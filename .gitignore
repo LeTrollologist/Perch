@@ -11,6 +11,10 @@ zig-out/
 *.o
 *.obj
 *.pdb
+*.ll
+
+# Local runtime config
+perch.ini
 
 # Release archives
 *.zip

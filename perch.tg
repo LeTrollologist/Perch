@@ -1,0 +1,725 @@
+// =============================================================================
+// Perch - Featherweight Focus & Pomodoro HUD for Windows
+// Written in the Tungsten Systems Programming Language
+// =============================================================================
+
+extern "C" {
+    // Memory & C-Runtime
+    fn tungsten_alloc(size: i64, align: i64) -> *mut u8;
+    fn memset(dest: *mut u8, val: i64, len: i64) -> *mut u8;
+    fn strlen(s: *const u8) -> i64;
+    fn fopen(filename: String, mode: String) -> i64;
+    fn fclose(stream: i64) -> i64;
+    fn fwrite(ptr: *const u8, size: i64, count: i64, stream: i64) -> i64;
+    fn WinExec(lpCmdLine: String, uCmdShow: i64) -> i64;
+
+    // Kernel32 Configuration & System APIs
+    fn GetModuleHandleA(lpModuleName: i64) -> i64;
+    fn GetPrivateProfileIntA(app: String, key: String, def_val: i64, file: String) -> i64;
+
+    // User32 Window & Messaging APIs
+    fn LoadCursorA(hInstance: i64, lpCursorName: i64) -> i64;
+    fn RegisterClassExA(lpwcx: i64) -> i64;
+    fn GetSystemMetrics(nIndex: i64) -> i64;
+    fn CreateWindowExA(
+        dwExStyle: i64,
+        lpClassName: String,
+        lpWindowName: String,
+        dwStyle: i64,
+        X: i64,
+        Y: i64,
+        nWidth: i64,
+        nHeight: i64,
+        hWndParent: i64,
+        hMenu: i64,
+        hInstance: i64,
+        lpParam: i64
+    ) -> i64;
+    fn ShowWindow(hWnd: i64, nCmdShow: i64) -> i64;
+    fn UpdateWindow(hWnd: i64) -> i64;
+    fn SetTimer(hWnd: i64, nIDEvent: i64, uElapse: i64, lpTimerFunc: i64) -> i64;
+    fn InvalidateRect(hWnd: i64, lpRect: i64, bErase: i64) -> i64;
+    fn GetClientRect(hWnd: i64, lpRect: i64) -> i64;
+    fn GetMessageA(lpMsg: i64, hWnd: i64, wMsgFilterMin: i64, wMsgFilterMax: i64) -> i64;
+    fn TranslateMessage(lpMsg: i64) -> i64;
+    fn DispatchMessageA(lpMsg: i64) -> i64;
+    fn PostQuitMessage(nExitCode: i64): void;
+    fn DefWindowProcA(hWnd: i64, Msg: i64, wParam: i64, lParam: i64) -> i64;
+    fn GetWindowLongPtrA(hWnd: i64, nIndex: i64) -> i64;
+    fn SetWindowLongPtrA(hWnd: i64, nIndex: i64, dwNewLong: i64) -> i64;
+    fn GetKeyState(nVirtKey: i64) -> i64;
+    fn ReleaseCapture() -> i64;
+    fn SendMessageA(hWnd: i64, Msg: i64, wParam: i64, lParam: i64) -> i64;
+    fn MessageBeep(uType: i64) -> i64;
+
+    // GDI32 Painting & Font APIs
+    fn BeginPaint(hWnd: i64, lpPaint: i64) -> i64;
+    fn EndPaint(hWnd: i64, lpPaint: i64) -> i64;
+    fn CreateSolidBrush(color: i64) -> i64;
+    fn DeleteObject(ho: i64) -> i64;
+    fn FillRect(hDC: i64, lprc: i64, hbr: i64) -> i64;
+    fn SetBkMode(hDC: i64, mode: i64) -> i64;
+    fn SetTextColor(hDC: i64, color: i64) -> i64;
+    fn SelectObject(hDC: i64, h: i64) -> i64;
+    fn TextOutA(hDC: i64, x: i64, y: i64, lpString: String, c: i64) -> i64;
+    fn CreateFontA(
+        cHeight: i64,
+        cWidth: i64,
+        cEscapement: i64,
+        cOrientation: i64,
+        cWeight: i64,
+        bItalic: i64,
+        bUnderline: i64,
+        bStrikeOut: i64,
+        iCharSet: i64,
+        iOutPrecision: i64,
+        iClipPrecision: i64,
+        iQuality: i64,
+        iPitchAndFamily: i64,
+        pszFaceName: String
+    ) -> i64;
+}
+
+// -----------------------------------------------------------------------------
+// Buffer Serialization Helpers (Safe Memory R/W)
+// -----------------------------------------------------------------------------
+
+fn write_u32(buf: *mut u8, offset: i64, val: i64) {
+    let b0 = val - (val / 256) * 256;
+    let v1 = val / 256;
+    let b1 = v1 - (v1 / 256) * 256;
+    let v2 = v1 / 256;
+    let b2 = v2 - (v2 / 256) * 256;
+    let v3 = v2 / 256;
+    let b3 = v3 - (v3 / 256) * 256;
+
+    buf[offset] = b0 as u8;
+    buf[offset + 1] = b1 as u8;
+    buf[offset + 2] = b2 as u8;
+    buf[offset + 3] = b3 as u8;
+}
+
+fn write_u64(buf: *mut u8, offset: i64, val: i64) {
+    write_u32(buf, offset, val);
+    write_u32(buf, offset + 4, val / 4294967296);
+}
+
+fn read_u32(buf: *mut u8, offset: i64) -> i64 {
+    let b0 = buf[offset] as i64;
+    let b1 = buf[offset + 1] as i64;
+    let b2 = buf[offset + 2] as i64;
+    let b3 = buf[offset + 3] as i64;
+    return b0 + b1 * 256 + b2 * 65536 + b3 * 16777216;
+}
+
+fn read_i32(buf: *mut u8, offset: i64) -> i64 {
+    let u = read_u32(buf, offset);
+    if u >= 2147483648 {
+        return u - 4294967296;
+    }
+    return u;
+}
+
+// -----------------------------------------------------------------------------
+// Color & Timer Calculations
+// -----------------------------------------------------------------------------
+
+fn rgb(r: i64, g: i64, b: i64) -> i64 {
+    return r + g * 256 + b * 65536;
+}
+
+// -----------------------------------------------------------------------------
+// Application State Layout (128-byte Buffer)
+// -----------------------------------------------------------------------------
+// [00] mode: 0 = Focus (25m), 1 = Short Break (5m), 2 = Long Break (15m)
+// [04] total_seconds: Total duration for current mode
+// [08] remaining_seconds: Seconds left on clock
+// [12] is_running: 1 = Active countdown, 0 = Paused
+// [16] tick_half_sec: 500ms tick accumulator
+// [20] alert_flash: Alarm flash toggle (0 or 1)
+// [24] completed_sessions: Count of finished focus intervals
+// [28] focus_mins: Configured focus minutes
+// [32] short_break_mins: Configured short break minutes
+// [36] long_break_mins: Configured long break minutes
+// [40] sessions_until_long_break: Target intervals for long break
+// [44] sound_enabled: 1 = play chime on alarm, 0 = silent
+// [48] auto_start: 1 = automatically start next interval
+// [52] key_pause: VK code for pause/resume (default 32 = Space)
+// [56] key_reset: VK code for timer reset (default 82 = 'R')
+// [60] key_cycle_mode: VK code for mode cycle (default 77 = 'M')
+// [64] key_settings: VK code for settings (default 83 = 'S')
+// [68] key_quit: VK code for exit (default 81 = 'Q')
+// [72] hud_width: HUD width in pixels
+// [76] hud_height: HUD height in pixels
+
+fn state_get_mode(s: *mut u8) -> i64 { read_u32(s, 0) }
+fn state_set_mode(s: *mut u8, v: i64) { write_u32(s, 0, v); }
+
+fn state_get_total(s: *mut u8) -> i64 { read_u32(s, 4) }
+fn state_set_total(s: *mut u8, v: i64) { write_u32(s, 4, v); }
+
+fn state_get_remaining(s: *mut u8) -> i64 { read_u32(s, 8) }
+fn state_set_remaining(s: *mut u8, v: i64) { write_u32(s, 8, v); }
+
+fn state_get_running(s: *mut u8) -> i64 { read_u32(s, 12) }
+fn state_set_running(s: *mut u8, v: i64) { write_u32(s, 12, v); }
+
+fn state_get_tick(s: *mut u8) -> i64 { read_u32(s, 16) }
+fn state_set_tick(s: *mut u8, v: i64) { write_u32(s, 16, v); }
+
+fn state_get_flash(s: *mut u8) -> i64 { read_u32(s, 20) }
+fn state_set_flash(s: *mut u8, v: i64) { write_u32(s, 20, v); }
+
+fn state_get_sessions(s: *mut u8) -> i64 { read_u32(s, 24) }
+fn state_set_sessions(s: *mut u8, v: i64) { write_u32(s, 24, v); }
+
+fn state_get_focus_mins(s: *mut u8) -> i64 { read_u32(s, 28) }
+fn state_set_focus_mins(s: *mut u8, v: i64) { write_u32(s, 28, v); }
+
+fn state_get_short_mins(s: *mut u8) -> i64 { read_u32(s, 32) }
+fn state_set_short_mins(s: *mut u8, v: i64) { write_u32(s, 32, v); }
+
+fn state_get_long_mins(s: *mut u8) -> i64 { read_u32(s, 36) }
+fn state_set_long_mins(s: *mut u8, v: i64) { write_u32(s, 36, v); }
+
+fn state_get_target_sessions(s: *mut u8) -> i64 { read_u32(s, 40) }
+fn state_set_target_sessions(s: *mut u8, v: i64) { write_u32(s, 40, v); }
+
+fn state_get_sound(s: *mut u8) -> i64 { read_u32(s, 44) }
+fn state_set_sound(s: *mut u8, v: i64) { write_u32(s, 44, v); }
+
+fn state_get_auto_start(s: *mut u8) -> i64 { read_u32(s, 48) }
+fn state_set_auto_start(s: *mut u8, v: i64) { write_u32(s, 48, v); }
+
+fn state_get_key_pause(s: *mut u8) -> i64 { read_u32(s, 52) }
+fn state_set_key_pause(s: *mut u8, v: i64) { write_u32(s, 52, v); }
+
+fn state_get_key_reset(s: *mut u8) -> i64 { read_u32(s, 56) }
+fn state_set_key_reset(s: *mut u8, v: i64) { write_u32(s, 56, v); }
+
+fn state_get_key_cycle(s: *mut u8) -> i64 { read_u32(s, 60) }
+fn state_set_key_cycle(s: *mut u8, v: i64) { write_u32(s, 60, v); }
+
+fn state_get_key_settings(s: *mut u8) -> i64 { read_u32(s, 64) }
+fn state_set_key_settings(s: *mut u8, v: i64) { write_u32(s, 64, v); }
+
+fn state_get_key_quit(s: *mut u8) -> i64 { read_u32(s, 68) }
+fn state_set_key_quit(s: *mut u8, v: i64) { write_u32(s, 68, v); }
+
+// -----------------------------------------------------------------------------
+// Settings Management & Persistence
+// -----------------------------------------------------------------------------
+
+fn ensure_default_settings() {
+    let ini_path = ".\\perch.ini";
+    let f = unsafe { fopen(ini_path, "r") };
+    if f != 0 {
+        unsafe { fclose(f); }
+        return;
+    }
+
+    let default_config = "; ==============================================================================\n; Perch Focus HUD - Configuration & Custom Bindings\n; ==============================================================================\n\n[Timer]\n; Durations in minutes\nfocus_mins = 25\nshort_break_mins = 5\nlong_break_mins = 15\n\n; Completed focus sessions before automatically suggesting a long break\nsessions_until_long_break = 4\n\n; Audio alarm sound on completion (1 = enabled, 0 = silent)\nsound_enabled = 1\n\n; Auto-start next countdown on interval switch (1 = auto, 0 = manual start)\nauto_start = 0\n\n[Display]\nwidth = 175\nheight = 54\nmargin_top = 20\nmargin_right = 20\n\n[Bindings]\n; Virtual-Key codes (Windows VK):\n; 32 = Space (Pause/Resume)\n; 82 = 'R' (Reset timer)\n; 77 = 'M' (Cycle mode)\n; 83 = 'S' (Open / reload settings)\n; 81 = 'Q' (Quit)\nkey_pause = 32\nkey_reset = 82\nkey_cycle_mode = 77\nkey_settings = 83\nkey_quit = 81\n";
+
+    let w = unsafe { fopen(ini_path, "w") };
+    if w != 0 {
+        let len = unsafe { strlen(default_config as *const u8) };
+        unsafe {
+            fwrite(default_config as *const u8, 1, len, w);
+            fclose(w);
+        }
+    }
+}
+
+fn load_settings_into_state(s: *mut u8) {
+    let ini_file = ".\\perch.ini";
+    ensure_default_settings();
+
+    unsafe {
+        let f_mins = GetPrivateProfileIntA("Timer", "focus_mins", 25, ini_file);
+        let s_mins = GetPrivateProfileIntA("Timer", "short_break_mins", 5, ini_file);
+        let l_mins = GetPrivateProfileIntA("Timer", "long_break_mins", 15, ini_file);
+        let target_ses = GetPrivateProfileIntA("Timer", "sessions_until_long_break", 4, ini_file);
+        let snd = GetPrivateProfileIntA("Timer", "sound_enabled", 1, ini_file);
+        let auto_st = GetPrivateProfileIntA("Timer", "auto_start", 0, ini_file);
+
+        let k_pause = GetPrivateProfileIntA("Bindings", "key_pause", 32, ini_file);
+        let k_reset = GetPrivateProfileIntA("Bindings", "key_reset", 82, ini_file);
+        let k_cycle = GetPrivateProfileIntA("Bindings", "key_cycle_mode", 77, ini_file);
+        let k_sett = GetPrivateProfileIntA("Bindings", "key_settings", 83, ini_file);
+        let k_quit = GetPrivateProfileIntA("Bindings", "key_quit", 81, ini_file);
+
+        state_set_focus_mins(s, f_mins);
+        state_set_short_mins(s, s_mins);
+        state_set_long_mins(s, l_mins);
+        state_set_target_sessions(s, target_ses);
+        state_set_sound(s, snd);
+        state_set_auto_start(s, auto_st);
+
+        state_set_key_pause(s, k_pause);
+        state_set_key_reset(s, k_reset);
+        state_set_key_cycle(s, k_cycle);
+        state_set_key_settings(s, k_sett);
+        state_set_key_quit(s, k_quit);
+    }
+}
+
+fn apply_mode_duration(s: *mut u8, mode: i64) {
+    state_set_mode(s, mode);
+    let mut duration = 25 * 60;
+    if mode == 0 {
+        duration = state_get_focus_mins(s) * 60;
+    } else if mode == 1 {
+        duration = state_get_short_mins(s) * 60;
+    } else {
+        duration = state_get_long_mins(s) * 60;
+    }
+    state_set_total(s, duration);
+    state_set_remaining(s, duration);
+    state_set_flash(s, 0);
+    state_set_tick(s, 0);
+    state_set_running(s, 1);
+}
+
+// -----------------------------------------------------------------------------
+// Time String Formatter (MM:SS)
+// -----------------------------------------------------------------------------
+
+fn format_timer_str(buf: *mut u8, seconds: i64) {
+    let mut s = seconds;
+    if s < 0 { s = 0; }
+    let mins = s / 60;
+    let secs = s - mins * 60;
+
+    let m10 = mins / 10;
+    let m1 = mins - m10 * 10;
+    let s10 = secs / 10;
+    let s1 = secs - s10 * 10;
+
+    buf[0] = (m10 + 48) as u8;
+    buf[1] = (m1 + 48) as u8;
+    buf[2] = 58 as u8; // ':'
+    buf[3] = (s10 + 48) as u8;
+    buf[4] = (s1 + 48) as u8;
+    buf[5] = 0 as u8;
+}
+
+// -----------------------------------------------------------------------------
+// Win32 Window Procedure
+// -----------------------------------------------------------------------------
+
+fn window_proc(hwnd: i64, msg: i64, wparam: i64, lparam: i64): i64 {
+    let state = unsafe { GetWindowLongPtrA(hwnd, 0 - 21) }; // GWLP_USERDATA = -21
+    if state == 0 {
+        return unsafe { DefWindowProcA(hwnd, msg, wparam, lparam) };
+    }
+    let s = state as *mut u8;
+
+    // 1. Timer Tick (500ms)
+    if msg == 275 { // WM_TIMER = 0x0113
+        let cur_tick = state_get_tick(s) + 1;
+        state_set_tick(s, cur_tick);
+
+        let remaining = state_get_remaining(s);
+        let is_run = state_get_running(s);
+
+        if remaining > 0 {
+            if is_run != 0 && (cur_tick - (cur_tick / 2) * 2) == 0 {
+                let next_rem = remaining - 1;
+                state_set_remaining(s, next_rem);
+
+                if next_rem == 0 {
+                    // Timer expired!
+                    if state_get_sound(s) != 0 {
+                        unsafe { MessageBeep(48); } // MB_ICONEXCLAMATION = 0x30
+                    }
+                    // Increment completed sessions on focus finish
+                    if state_get_mode(s) == 0 {
+                        let completed = state_get_sessions(s) + 1;
+                        state_set_sessions(s, completed);
+                    }
+                }
+            }
+        } else {
+            // Alarm flashing state (alternates every 500ms)
+            let fl = state_get_flash(s);
+            let next_fl = 1 - fl;
+            state_set_flash(s, next_fl);
+            if next_fl != 0 && state_get_sound(s) != 0 {
+                unsafe { MessageBeep(48); }
+            }
+        }
+
+        unsafe { InvalidateRect(hwnd, 0, 0); }
+        return 0;
+    }
+
+    // 2. Painting HUD Graphics
+    if msg == 15 { // WM_PAINT = 0x000F
+        let ps = unsafe { tungsten_alloc(72, 8) };
+        let hdc = unsafe { BeginPaint(hwnd, ps as i64) };
+
+        let rect = unsafe { tungsten_alloc(16, 8) };
+        unsafe { GetClientRect(hwnd, rect as i64); }
+        let w = read_i32(rect, 8);
+        let h = read_i32(rect, 12);
+
+        let remaining = state_get_remaining(s);
+        let total = state_get_total(s);
+        let mode = state_get_mode(s);
+        let is_expired = (remaining == 0);
+        let is_run = state_get_running(s);
+        let flash = state_get_flash(s);
+
+        // Palette calculations
+        let mut bg_color = rgb(22, 24, 29); // Modern dark default
+        let mut text_color = rgb(56, 189, 248); // Focus = Cyan
+
+        if mode == 1 {
+            text_color = rgb(192, 132, 252); // Short Break = Purple
+        } else if mode == 2 {
+            text_color = rgb(52, 211, 153);  // Long Break = Emerald
+        }
+
+        if is_expired {
+            if flash != 0 {
+                bg_color = rgb(220, 38, 38); // Bright Red
+            } else {
+                bg_color = rgb(70, 10, 10);  // Deep Red
+            }
+            text_color = rgb(255, 255, 255);
+        } else if is_run == 0 {
+            text_color = rgb(251, 191, 36);  // Paused = Amber
+        }
+
+        // Draw Background
+        let bg_brush = unsafe { CreateSolidBrush(bg_color) };
+        unsafe {
+            FillRect(hdc, rect as i64, bg_brush);
+            DeleteObject(bg_brush);
+        }
+
+        // Draw Bottom Progress Bar
+        if !is_expired && total > 0 {
+            let prog_w = (remaining * w) / total;
+            let bar_rect = unsafe { tungsten_alloc(16, 8) };
+            write_u32(bar_rect, 0, 0);
+            write_u32(bar_rect, 4, h - 3);
+            write_u32(bar_rect, 8, prog_w);
+            write_u32(bar_rect, 12, h);
+
+            let bar_brush = unsafe { CreateSolidBrush(text_color) };
+            unsafe {
+                FillRect(hdc, bar_rect as i64, bar_brush);
+                DeleteObject(bar_brush);
+            }
+        }
+
+        unsafe { SetBkMode(hdc, 1); } // TRANSPARENT = 1
+
+        // Render Large Timer Digits (26pt Bold)
+        let font_timer = unsafe {
+            CreateFontA(26, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
+        };
+        let old_font = unsafe { SelectObject(hdc, font_timer) };
+
+        let time_buf = unsafe { tungsten_alloc(16, 8) };
+        format_timer_str(time_buf, remaining);
+
+        unsafe {
+            SetTextColor(hdc, text_color);
+            TextOutA(hdc, 14, 6, time_buf as String, 5);
+            SelectObject(hdc, old_font);
+            DeleteObject(font_timer);
+        }
+
+        // Render Status Subtitle Label (11pt Bold)
+        let font_sub = unsafe {
+            CreateFontA(11, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
+        };
+        unsafe { SelectObject(hdc, font_sub); }
+
+        let mut sub_text = "FOCUS";
+        if is_expired {
+            sub_text = "TIME'S UP!";
+        } else if is_run == 0 {
+            if mode == 0 { sub_text = "FOCUS [PAUSED]"; }
+            else if mode == 1 { sub_text = "SHORT BREAK [PAUSED]"; }
+            else { sub_text = "LONG BREAK [PAUSED]"; }
+        } else {
+            if mode == 0 { sub_text = "FOCUS"; }
+            else if mode == 1 { sub_text = "SHORT BREAK"; }
+            else { sub_text = "LONG BREAK"; }
+        }
+
+        let mut sub_color = rgb(150, 155, 165);
+        if is_expired {
+            sub_color = rgb(255, 255, 255);
+        }
+
+        let sub_len = unsafe { strlen(sub_text as *const u8) };
+        unsafe {
+            SetTextColor(hdc, sub_color);
+            TextOutA(hdc, 16, 34, sub_text, sub_len);
+        }
+
+        // Render Session Dots (e.g. ● ● ○ ○) in upper right
+        let sessions = state_get_sessions(s);
+        let target_ses = state_get_target_sessions(s);
+        let cur_in_cycle = sessions - (sessions / target_ses) * target_ses;
+
+        let dot_font = unsafe {
+            CreateFontA(10, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
+        };
+        unsafe { SelectObject(hdc, dot_font); }
+
+        let mut d: i64 = 0;
+        while d < target_ses {
+            let dx = w - 16 - (target_ses - 1 - d) * 11;
+            let mut dot_char = "o";
+            let mut dot_col = rgb(70, 75, 85);
+            if d < cur_in_cycle {
+                dot_char = "*";
+                dot_col = text_color;
+            }
+            unsafe {
+                SetTextColor(hdc, dot_col);
+                TextOutA(hdc, dx, 8, dot_char, 1);
+            }
+            d = d + 1;
+        }
+
+        unsafe {
+            SelectObject(hdc, old_font);
+            DeleteObject(dot_font);
+            DeleteObject(font_sub);
+            EndPaint(hwnd, ps as i64);
+        }
+        return 0;
+    }
+
+    // 3. Left Click: Pause / Resume or Shift-Drag
+    if msg == 513 { // WM_LBUTTONDOWN = 0x0201
+        // If alarm is ringing, clicking anywhere dismisses it and prepares next break
+        if state_get_remaining(s) == 0 {
+            state_set_flash(s, 0);
+            let mode = state_get_mode(s);
+            if mode == 0 {
+                // Focus finished: switch to short or long break
+                let sessions = state_get_sessions(s);
+                let target = state_get_target_sessions(s);
+                if (sessions - (sessions / target) * target) == 0 && sessions > 0 {
+                    apply_mode_duration(s, 2); // Long Break
+                } else {
+                    apply_mode_duration(s, 1); // Short Break
+                }
+            } else {
+                apply_mode_duration(s, 0); // Back to Focus
+            }
+            unsafe { InvalidateRect(hwnd, 0, 0); }
+            return 0;
+        }
+
+        // Shift + Drag to reposition
+        let shift_state = unsafe { GetKeyState(16) }; // VK_SHIFT = 16
+        if shift_state < 0 {
+            unsafe {
+                ReleaseCapture();
+                SendMessageA(hwnd, 161, 2, 0); // WM_NCLBUTTONDOWN = 0x00A1, HTCAPTION = 2
+            }
+        } else {
+            let cur_run = state_get_running(s);
+            state_set_running(s, 1 - cur_run);
+            unsafe { InvalidateRect(hwnd, 0, 0); }
+        }
+        return 0;
+    }
+
+    // 4. Right Click: Reset Timer & Reload Settings
+    if msg == 517 { // WM_RBUTTONUP = 0x0205
+        load_settings_into_state(s);
+        let mode = state_get_mode(s);
+        apply_mode_duration(s, mode);
+        unsafe { InvalidateRect(hwnd, 0, 0); }
+        return 0;
+    }
+
+    // 5. Double Right Click: Clean Exit
+    if msg == 518 { // WM_RBUTTONDBLCLK = 0x0206
+        unsafe { PostQuitMessage(0); }
+        return 0;
+    }
+
+    // 6. Middle Click: Cycle Focus ↔ Short Break ↔ Long Break
+    if msg == 520 { // WM_MBUTTONUP = 0x0208
+        let mut mode = state_get_mode(s) + 1;
+        if mode > 2 { mode = 0; }
+        apply_mode_duration(s, mode);
+        unsafe { InvalidateRect(hwnd, 0, 0); }
+        return 0;
+    }
+
+    // 7. Mouse Wheel: Fine-tune remaining time (+/- 1 minute)
+    if msg == 522 { // WM_MOUSEWHEEL = 0x020A
+        let raw_delta = wparam / 65536;
+        let mut delta = raw_delta;
+        if raw_delta >= 32768 { delta = raw_delta - 65536; }
+
+        let rem = state_get_remaining(s);
+        let tot = state_get_total(s);
+        let mut new_rem = rem;
+
+        if delta > 0 {
+            new_rem = rem + 60; // +1 minute
+            if new_rem > 5940 { new_rem = 5940; } // max 99 mins
+            if new_rem > tot { state_set_total(s, new_rem); }
+        } else if delta < 0 {
+            new_rem = rem - 60; // -1 minute
+            if new_rem < 10 { new_rem = 10; } // min 10 secs
+        }
+
+        state_set_remaining(s, new_rem);
+        unsafe { InvalidateRect(hwnd, 0, 0); }
+        return 0;
+    }
+
+    // 8. Custom Keyboard Hotkeys
+    if msg == 256 { // WM_KEYDOWN = 0x0100
+        let k_pause = state_get_key_pause(s);
+        let k_reset = state_get_key_reset(s);
+        let k_cycle = state_get_key_cycle(s);
+        let k_sett = state_get_key_settings(s);
+        let k_quit = state_get_key_quit(s);
+
+        if wparam == 27 || wparam == k_quit { // Esc or configured quit key
+            if state_get_remaining(s) == 0 {
+                // Dismiss alarm
+                state_set_flash(s, 0);
+                apply_mode_duration(s, 0);
+                unsafe { InvalidateRect(hwnd, 0, 0); }
+            } else {
+                unsafe { PostQuitMessage(0); }
+            }
+            return 0;
+        }
+
+        if wparam == k_pause {
+            let cur_run = state_get_running(s);
+            state_set_running(s, 1 - cur_run);
+            unsafe { InvalidateRect(hwnd, 0, 0); }
+            return 0;
+        }
+
+        if wparam == k_reset {
+            load_settings_into_state(s);
+            let mode = state_get_mode(s);
+            apply_mode_duration(s, mode);
+            unsafe { InvalidateRect(hwnd, 0, 0); }
+            return 0;
+        }
+
+        if wparam == k_cycle {
+            let mut mode = state_get_mode(s) + 1;
+            if mode > 2 { mode = 0; }
+            apply_mode_duration(s, mode);
+            unsafe { InvalidateRect(hwnd, 0, 0); }
+            return 0;
+        }
+
+        if wparam == k_sett {
+            // Open perch.ini in notepad for instant configuration
+            unsafe { WinExec("notepad.exe .\\perch.ini", 1); }
+            return 0;
+        }
+    }
+
+    // 9. Window Teardown
+    if msg == 2 { // WM_DESTROY = 0x0002
+        unsafe { PostQuitMessage(0); }
+        return 0;
+    }
+
+    return unsafe { DefWindowProcA(hwnd, msg, wparam, lparam) };
+}
+
+// -----------------------------------------------------------------------------
+// Program Entry Point
+// -----------------------------------------------------------------------------
+
+fn main(): i64 {
+    unsafe {
+        let hInstance = GetModuleHandleA(0);
+        let class_name = "PerchTimerHUD";
+
+        // Allocate & Register WNDCLASSEXA
+        let wc = tungsten_alloc(80, 8);
+        memset(wc, 0, 80);
+
+        write_u32(wc, 0, 80);                             // cbSize
+        write_u32(wc, 4, 8);                              // style = CS_DBLCLKS (0x0008)
+        write_u64(wc, 8, window_proc);                    // lpfnWndProc
+        write_u64(wc, 24, hInstance);                     // hInstance
+        write_u64(wc, 40, LoadCursorA(0, 32512));         // hCursor = IDC_ARROW (32512)
+        write_u64(wc, 64, class_name as i64);             // lpszClassName
+
+        let reg_ok = RegisterClassExA(wc as i64);
+        if reg_ok == 0 {
+            return 1;
+        }
+
+        // Initialize HUD State & Settings
+        let s = tungsten_alloc(128, 8);
+        memset(s, 0, 128);
+        load_settings_into_state(s);
+        apply_mode_duration(s, 0); // Default to Focus mode
+
+        let overlay_w = 175;
+        let overlay_h = 54;
+        let margin = 20;
+
+        let screen_w = GetSystemMetrics(0); // SM_CXSCREEN = 0
+        let pos_x = screen_w - overlay_w - margin;
+        let pos_y = margin;
+
+        // Frameless, topmost, does not show in Alt-Tab
+        // WS_EX_TOPMOST (0x08) | WS_EX_TOOLWINDOW (0x80) = 0x88 (136)
+        let ex_style = 136;
+        let style = 2147483648; // WS_POPUP (0x80000000)
+
+        let hwnd = CreateWindowExA(
+            ex_style,
+            class_name,
+            "Perch",
+            style,
+            pos_x,
+            pos_y,
+            overlay_w,
+            overlay_h,
+            0,
+            0,
+            hInstance,
+            0
+        );
+
+        if hwnd == 0 {
+            return 2;
+        }
+
+        // Attach state pointer to HWND user data
+        SetWindowLongPtrA(hwnd, 0 - 21, s as i64); // GWLP_USERDATA = -21
+
+        // 500ms timer interval (exact 1s ticks + smooth alarm flashing)
+        SetTimer(hwnd, 1, 500, 0);
+
+        ShowWindow(hwnd, 5); // SW_SHOW = 5
+        UpdateWindow(hwnd);
+
+        // Standard Win32 Message Loop
+        let msg = tungsten_alloc(48, 8);
+        while GetMessageA(msg as i64, 0, 0, 0) > 0 {
+            TranslateMessage(msg as i64);
+            DispatchMessageA(msg as i64);
+        }
+    }
+
+    return 0;
+}
