@@ -14,6 +14,7 @@ extern "C" {
     fn WinExec(lpCmdLine: String, uCmdShow: i64) -> i64;
 
     // Kernel32 Configuration & System APIs
+    fn FreeConsole() -> i64;
     fn GetModuleHandleA(lpModuleName: i64) -> i64;
     fn GetPrivateProfileIntA(app: String, key: String, def_val: i64, file: String) -> i64;
 
@@ -647,6 +648,7 @@ fn window_proc(hwnd: i64, msg: i64, wparam: i64, lparam: i64): i64 {
 
 fn main(): i64 {
     unsafe {
+        FreeConsole();
         let hInstance = GetModuleHandleA(0);
         let class_name = "PerchTimerHUD";
 
