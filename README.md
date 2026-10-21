@@ -1,6 +1,6 @@
 # Perch
 
-A featherweight, borderless Pomodoro HUD and focus timer for Windows, written in the [Tungsten](https://github.com/LeTrollologist/Tungsten) systems programming language.
+A featherweight, borderless Pomodoro HUD and focus timer for Windows, written in the [Morrow](https://github.com/LeTrollologist/Morrow) systems programming language.
 
 Perch floats quietly in the corner of your screen—always on top, minimal distraction, zero fluff.
 
@@ -24,7 +24,7 @@ Perch floats quietly in the corner of your screen—always on top, minimal distr
 
 | Metric | Perch |
 | :--- | :--- |
-| **Language** | [Tungsten](https://github.com/LeTrollologist/Tungsten) |
+| **Language** | [Morrow](https://github.com/LeTrollologist/Morrow) |
 | **Binary Size** | ~60 KB |
 | **RAM Footprint** | < 2 MB |
 | **Startup Time** | < 1 ms |
@@ -98,7 +98,7 @@ key_quit = 81
 
 ## Building from Source
 
-Requires the [Tungsten](https://github.com/LeTrollologist/Tungsten) compiler (`tgc.exe`).
+Requires the [Morrow](https://github.com/LeTrollologist/Morrow) compiler (`mwc.exe`).
 
 Clone the repository and compile using `build.bat`:
 
@@ -108,10 +108,10 @@ cd Perch
 build.bat
 ```
 
-Or invoke the Tungsten compiler directly:
+Or invoke the Morrow compiler directly:
 
 ```powershell
-..\Tungsten\bin\tgc.exe build perch.tg -o perch.exe
+..\Morrow\bin\mwc.exe build perch.tg -o perch.exe
 ```
 
 ---
